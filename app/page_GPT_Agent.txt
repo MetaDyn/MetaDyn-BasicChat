@@ -1,0 +1,175 @@
+import { NextRequest } from 'next/server';
+import { NextResponse } from 'next/server';
+
+interface Message {
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+}
+
+interface ChatRequest {
+  messages: Message[];
+}
+
+// Define available functions/tools
+const availableFunctions = [
+  {
+    name: "get_weather",
+    description: "Get current weather for a location",
+    parameters: {
+      type: "object",
+      properties: {
+        location: {
+          type: "string",
+          description: "The city and state, e.g. San Francisco, CA"
+        }
+      },
+      required: ["location"]
+    }
+  },
+  {
+    name: "calculate",
+    description: "Perform mathematical calculations",
+    parameters: {
+      type: "object",
+      properties: {
+        expression: {
+          type: "string",
+          description: "Mathematical expression to evaluate, e.g. '2 + 2' or 'sqrt(16)'"
+        }
+      },
+      required: ["expression"]
+    }
+  },
+  {
+    name: "search_web",
+    description: "Search the web for information",
+    parameters: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description: "Search query"
+        }
+      },
+      required: ["query"]
+    }
+  }
+];
+
+// Mock function implementations
+async function executeFunction(functionName: string, args: any) {
+  switch (functionName) {
+    case 'get_weather':
+      // Mock weather data - in real app, call weather API
+      return {
+        location: args.location,
+        temperature: "72°F",
+        condition: "Partly cloudy",
+        humidity: "45%"
+      };
+    
+    case 'calculate':
+      try {
+        // Simple math evaluation (be careful with eval in production!)
+        const result = Function(`"use strict"; return (${args.expression})`)();
+        return { expression: args.expression, result: result };
+      } catch (error) {
+        return { error: "Invalid mathematical expression" };
+      }
+    
+    case 'search_web':
+      // Mock search results - in real app, call search API
+      return {
+        query: args.query,
+        results: [
+          { title: "Sample Result 1", url: "https://example1.com", snippet: "Mock search result..." },
+          { title: "Sample Result 2", url: "https://example2.com", snippet: "Another mock result..." }
+        ]
+      };
+    
+    default:
+      return { error: "Function not found" };
+  }
+}
+
+export async function POST(request: NextRequest): Promise<NextResponse> {
+  try {
+    const { messages }: ChatRequest = await request.json();
+
+    // Add system message to enable agent mode
+    const systemMessage: Message = {
+      role: "system",
+      content: "You are an AI assistant with access to tools. You can call functions to help users with tasks like getting weather, performing calculations, or searching the web. When you need to use a tool, respond with a function call."
+    };
+
+    const messagesWithSystem = [systemMessage, ...messages];
+
+    console.log('Sending request to LM Studio with functions...');
+    
+    const response = await fetch('http://172.31.0.1:1234/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'local-model',
+        messages: messagesWithSystem,
+        temperature: 0.7,
+        max_tokens: 1000,
+        // Enable function calling
+        functions: availableFunctions,
+        function_call: "auto"  // Let the model decide when to call functions
+      }),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`LM Studio API error: ${response.status} - ${errorText}`);
+    }
+
+    const data = await response.json();
+    console.log('LM Studio response:', data);
+    
+    const choice = data.choices[0];
+    
+    // Check if the model wants to call a function
+    if (choice.message.function_call) {
+      const functionCall = choice.message.function_call;
+      const functionName = functionCall.name;
+      const functionArgs = JSON.parse(functionCall.arguments);
+      
+      console.log(`Model wants to call function: ${functionName}`, functionArgs);
+      
+      // Execute the function
+      const functionResult = await executeFunction(functionName, functionArgs);
+      
+      // Send the function result back to the model
+      const functionResultMessage: Message = {
+        role: "assistant",
+        content: `I used the ${functionName} function. Here are the results: ${JSON.stringify(functionResult, null, 2)}`
+      };
+      
+      // You could make another API call here to get the model's response to the function result
+      // For now, we'll just return the function result
+      return NextResponse.json({ 
+        content: functionResultMessage.content,
+        functionUsed: functionName,
+        functionResult: functionResult
+      });
+    }
+    
+    // Regular text response
+    const content = choice.message.content;
+    return NextResponse.json({ content });
+    
+  } catch (error) {
+    console.error('API Error:', error);
+    return NextResponse.json(
+      { 
+        error: 'Failed to get response from LM Studio',
+        details: error instanceof Error ? error.message : 'Unknown error'
+      },
+      { status: 500 }
+    );
+  }
+}
